@@ -1,40 +1,77 @@
-function main() {
-  // Configuration object for easy customization
-  const CONFIG = {
-    baseListName: "Account Negative Keywords List",  // Base name of the negative keyword lists
-    maxKeywordsPerList: 5000,  // Maximum keywords per list (Google Ads limit)
-    maxLists: 3,  // Maximum number of lists to use
-    batchSize: 200,  // Batch size for processing
-    campaignConfig: {
-      names: ['Campaign_Name_1', 'Campaign_Name_2'],  // Add your campaign names
-      type: 'SHOPPING',  // 'SHOPPING' or 'SEARCH'
-      dateRange: 'LAST_30_DAYS'
-    },
-    // Add terms that should always be preserved
-    preserveTerms: [
-      // Add your preservation terms here
-      // Example: 'brand1', 'product1', 'feature1'
-    ]
-  };
-
-  var listIndex = 1;
-  var negativeKeywordList = getNegativeKeywordListByName(CONFIG.baseListName + listIndex);
+// =====================================
+// USER CONFIGURATION - Edit these values
+// =====================================
+const USER_SETTINGS = {
+  // Choose ONE of these filtering methods by filling it in (leave the other empty):
+  campaignNames: [],  // Example: ['Black_Friday_Shopping', 'Christmas_Sale']
+  campaignLabel: '',  // Example: 'NegativeKeywordAutomation'
   
-  while (negativeKeywordList && countNegativeKeywords(negativeKeywordList) >= CONFIG.maxKeywordsPerList) {
-    listIndex++;
-    if (listIndex > CONFIG.maxLists) {
-      Logger.log("Error: All negative keyword lists are full.");
+  campaignType: 'SHOPPING',  // Use 'SHOPPING' or 'SEARCH'
+  daysToAnalyze: 30,  // Choose from: 7, 14, 30, 60, or 90 days
+  
+  // Keyword filtering rules
+  keywordRules: {
+    // Terms to always preserve (never add as negative)
+    preserveTerms: [],  // Example: ['brand', 'product']
+    
+    // Terms that should trigger a negative keyword
+    // If ANY of these appear in search term, it will be added as negative
+    negativeTerms: [],  // Example: ['cheap', 'free', 'diy']
+    
+    // Alternatively, you can specify terms that MUST appear
+    // If search term doesn't contain ANY of these, it will be added as negative
+    requiredTerms: [],  // Example: ['professional', 'premium']
+    
+    // Note: Use either negativeTerms OR requiredTerms, not both
+    // Leave the array empty [] if you don't want to use that rule type
+  }
+};
+// =====================================
+
+// Script configuration - Don't edit below this line
+const VALID_DAYS = [7, 14, 30, 60, 90];
+
+const CONFIG = {
+  baseListName: "Account Negative Keywords List",
+  maxKeywordsPerList: 5000,
+  maxLists: 3,
+  batchSize: 200,
+  campaignConfig: {
+    names: USER_SETTINGS.campaignNames,
+    label: USER_SETTINGS.campaignLabel,
+    type: USER_SETTINGS.campaignType,
+    get dateRange() {
+      if (!VALID_DAYS.includes(USER_SETTINGS.daysToAnalyze)) {
+        throw new Error(`Invalid days setting. Please choose from: ${VALID_DAYS.join(', ')} days`);
+      }
+      return `LAST_${USER_SETTINGS.daysToAnalyze}_DAYS`;
+    }
+  },
+  keywordRules: USER_SETTINGS.keywordRules
+};
+
+function main() {
+  try {
+    // Validate settings
+    validateUserSettings();
+    
+    var listIndex = 1;
+    var negativeKeywordList = getNegativeKeywordListByName(CONFIG.baseListName + listIndex);
+    
+    while (negativeKeywordList && countNegativeKeywords(negativeKeywordList) >= CONFIG.maxKeywordsPerList) {
+      listIndex++;
+      if (listIndex > CONFIG.maxLists) {
+        Logger.log("Error: All negative keyword lists are full.");
+        return;
+      }
+      negativeKeywordList = getNegativeKeywordListByName(CONFIG.baseListName + listIndex);
+    }
+    
+    if (!negativeKeywordList) {
+      Logger.log("Error: Negative keyword list '" + CONFIG.baseListName + listIndex + "' not found.");
       return;
     }
-    negativeKeywordList = getNegativeKeywordListByName(CONFIG.baseListName + listIndex);
-  }
-  
-  if (!negativeKeywordList) {
-    Logger.log("Error: Negative keyword list '" + CONFIG.baseListName + listIndex + "' not found.");
-    return;
-  }
-  
-  try {
+    
     var report = generateReport(CONFIG.campaignConfig);
     var rows = report.rows();
     var searchTerms = [];
@@ -51,7 +88,7 @@ function main() {
     for (var i = 0; i < searchTerms.length && processedTerms < CONFIG.batchSize; i++) {
       var searchTerm = searchTerms[i];
       
-      if (!shouldKeep(searchTerm, CONFIG.preserveTerms)) {
+      if (!shouldKeep(searchTerm, CONFIG.keywordRules)) {
         var truncatedTerm = truncateSearchTerm(searchTerm);
         if (truncatedTerm && !negativeKeywords.includes(truncatedTerm)) {
           negativeKeywords.push(truncatedTerm);
@@ -74,6 +111,69 @@ function main() {
   }
 }
 
+function validateUserSettings() {
+  // Validate campaign filtering method
+  if (USER_SETTINGS.campaignNames.length > 0 && USER_SETTINGS.campaignLabel) {
+    throw new Error("Please use either campaignNames or campaignLabel, not both");
+  }
+  
+  if (!USER_SETTINGS.campaignNames.length && !USER_SETTINGS.campaignLabel) {
+    throw new Error("Please specify either campaignNames or campaignLabel");
+  }
+  
+  // Validate campaign type
+  if (!['SHOPPING', 'SEARCH'].includes(USER_SETTINGS.campaignType)) {
+    throw new Error("Campaign type must be either 'SHOPPING' or 'SEARCH'");
+  }
+  
+  // Validate days to analyze
+  if (!VALID_DAYS.includes(USER_SETTINGS.daysToAnalyze)) {
+    throw new Error(`Invalid days setting. Please choose from: ${VALID_DAYS.join(', ')} days`);
+  }
+  
+  // Validate keyword rules
+  const rules = USER_SETTINGS.keywordRules;
+  if (!rules) {
+    throw new Error("Keyword rules must be specified in USER_SETTINGS.keywordRules");
+  }
+  
+  if (rules.negativeTerms.length > 0 && rules.requiredTerms.length > 0) {
+    throw new Error("Please use either negativeTerms OR requiredTerms, not both");
+  }
+  
+  if (rules.negativeTerms.length === 0 && rules.requiredTerms.length === 0) {
+    throw new Error("Please specify either negativeTerms or requiredTerms");
+  }
+}
+
+function shouldKeep(searchTerm, rules) {
+  const lowerCaseTerm = searchTerm.toLowerCase();
+  
+  // First check preserve terms - these override all other rules
+  if (rules.preserveTerms.length > 0) {
+    if (rules.preserveTerms.some(term => 
+      lowerCaseTerm.includes(term.toLowerCase()))) {
+      return true;
+    }
+  }
+  
+  // If using negative terms: keep unless it contains any negative term
+  if (rules.negativeTerms.length > 0) {
+    return !rules.negativeTerms.some(term => 
+      lowerCaseTerm.includes(term.toLowerCase()));
+  }
+  
+  // If using required terms: keep only if it contains at least one required term
+  if (rules.requiredTerms.length > 0) {
+    return rules.requiredTerms.some(term => 
+      lowerCaseTerm.includes(term.toLowerCase()));
+  }
+  
+  // If no filtering rules specified, log warning and keep the term
+  Logger.log("Warning: No keyword rules specified. Please set either negativeTerms or requiredTerms.");
+  return true;
+}
+
 function generateReport(campaignConfig) {
   var reportQuery = "SELECT Query FROM ";
   
@@ -82,9 +182,22 @@ function generateReport(campaignConfig) {
     ? "SHOPPING_PERFORMANCE_REPORT "
     : "SEARCH_QUERY_PERFORMANCE_REPORT ";
     
-  // Add campaign name conditions if specified
+  // Add campaign filtering conditions
+  var conditions = [];
+  
+  // Filter by campaign names if specified
   if (campaignConfig.names && campaignConfig.names.length > 0) {
-    reportQuery += "WHERE CampaignName IN ['" + campaignConfig.names.join("','") + "'] ";
+    conditions.push("CampaignName IN ['" + campaignConfig.names.join("','") + "']");
+  }
+  
+  // Filter by campaign label if specified
+  if (campaignConfig.label) {
+    conditions.push("CampaignLabelNames CONTAINS_ANY ['" + campaignConfig.label + "']");
+  }
+  
+  // Add WHERE clause if we have any conditions
+  if (conditions.length > 0) {
+    reportQuery += "WHERE " + conditions.join(" AND ") + " ";
   }
   
   reportQuery += "DURING " + campaignConfig.dateRange;
@@ -106,13 +219,6 @@ function getNegativeKeywordListByName(listName) {
 
 function countNegativeKeywords(negativeKeywordList) {
   return negativeKeywordList.negativeKeywords().get().totalNumEntities();
-}
-
-function shouldKeep(searchTerm, preserveTerms) {
-  var lowerCaseTerm = searchTerm.toLowerCase();
-  return preserveTerms.some(function(term) {
-    return lowerCaseTerm.includes(term.toLowerCase());
-  });
 }
 
 function truncateSearchTerm(searchTerm) {
