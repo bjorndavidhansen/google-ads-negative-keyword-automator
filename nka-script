@@ -1,0 +1,181 @@
+function main() {
+  // Configuration object for easy customization
+  const CONFIG = {
+    baseListName: "Account Negative Keywords List",  // Base name of the negative keyword lists
+    maxKeywordsPerList: 5000,  // Maximum keywords per list (Google Ads limit)
+    maxLists: 3,  // Maximum number of lists to use
+    batchSize: 200,  // Batch size for processing
+    campaignConfig: {
+      names: ['Campaign_Name_1', 'Campaign_Name_2'],  // Add your campaign names
+      type: 'SHOPPING',  // 'SHOPPING' or 'SEARCH'
+      dateRange: 'LAST_30_DAYS'
+    },
+    // Add terms that should always be preserved
+    preserveTerms: [
+      // Add your preservation terms here
+      // Example: 'brand1', 'product1', 'feature1'
+    ]
+  };
+
+  var listIndex = 1;
+  var negativeKeywordList = getNegativeKeywordListByName(CONFIG.baseListName + listIndex);
+  
+  while (negativeKeywordList && countNegativeKeywords(negativeKeywordList) >= CONFIG.maxKeywordsPerList) {
+    listIndex++;
+    if (listIndex > CONFIG.maxLists) {
+      Logger.log("Error: All negative keyword lists are full.");
+      return;
+    }
+    negativeKeywordList = getNegativeKeywordListByName(CONFIG.baseListName + listIndex);
+  }
+  
+  if (!negativeKeywordList) {
+    Logger.log("Error: Negative keyword list '" + CONFIG.baseListName + listIndex + "' not found.");
+    return;
+  }
+  
+  try {
+    var report = generateReport(CONFIG.campaignConfig);
+    var rows = report.rows();
+    var searchTerms = [];
+    while (rows.hasNext()) {
+      var row = rows.next();
+      searchTerms.push(row['Query']);
+    }
+    
+    searchTerms = shuffleArray(searchTerms);
+    
+    var negativeKeywords = [];
+    var processedTerms = 0;
+
+    for (var i = 0; i < searchTerms.length && processedTerms < CONFIG.batchSize; i++) {
+      var searchTerm = searchTerms[i];
+      
+      if (!shouldKeep(searchTerm, CONFIG.preserveTerms)) {
+        var truncatedTerm = truncateSearchTerm(searchTerm);
+        if (truncatedTerm && !negativeKeywords.includes(truncatedTerm)) {
+          negativeKeywords.push(truncatedTerm);
+        }
+      }
+      
+      processedTerms++;
+    }
+    
+    if (negativeKeywords.length > 0) {
+      addNegativeKeywordsToList(negativeKeywordList, negativeKeywords, CONFIG.baseListName, listIndex, CONFIG.maxKeywordsPerList);
+      Logger.log("Added " + negativeKeywords.length + " negative keywords. Total processed: " + processedTerms);
+    } else {
+      Logger.log("No negative keywords to add.");
+    }
+    
+    Logger.log("Script completed successfully. Total search terms processed: " + processedTerms);
+  } catch (e) {
+    Logger.log("An error occurred: " + e.toString());
+  }
+}
+
+function generateReport(campaignConfig) {
+  var reportQuery = "SELECT Query FROM ";
+  
+  // Choose report type based on campaign type
+  reportQuery += campaignConfig.type === 'SHOPPING' 
+    ? "SHOPPING_PERFORMANCE_REPORT "
+    : "SEARCH_QUERY_PERFORMANCE_REPORT ";
+    
+  // Add campaign name conditions if specified
+  if (campaignConfig.names && campaignConfig.names.length > 0) {
+    reportQuery += "WHERE CampaignName IN ['" + campaignConfig.names.join("','") + "'] ";
+  }
+  
+  reportQuery += "DURING " + campaignConfig.dateRange;
+  
+  return AdsApp.report(reportQuery);
+}
+
+function getNegativeKeywordListByName(listName) {
+  var negativeKeywordLists = AdsApp.negativeKeywordLists()
+    .withCondition("Name = '" + listName + "'")
+    .get();
+  
+  if (negativeKeywordLists.hasNext()) {
+    return negativeKeywordLists.next();
+  } else {
+    return null;
+  }
+}
+
+function countNegativeKeywords(negativeKeywordList) {
+  return negativeKeywordList.negativeKeywords().get().totalNumEntities();
+}
+
+function shouldKeep(searchTerm, preserveTerms) {
+  var lowerCaseTerm = searchTerm.toLowerCase();
+  return preserveTerms.some(function(term) {
+    return lowerCaseTerm.includes(term.toLowerCase());
+  });
+}
+
+function truncateSearchTerm(searchTerm) {
+  var words = searchTerm.split(' ');
+  if (words.length >= 10) {
+    return words.slice(0, 9).join(' ');
+  }
+  return searchTerm;
+}
+
+function sanitizeKeyword(keyword) {
+  return keyword.replace(/[^a-zA-Z0-9\s]/g, '');
+}
+
+function addNegativeKeywordsToList(negativeKeywordList, keywords, baseListName, listIndex, maxKeywordsPerList) {
+  var currentList = negativeKeywordList;
+  var currentIndex = listIndex;
+  
+  keywords.forEach(function(keyword) {
+    try {
+      var sanitizedKeyword = sanitizeKeyword(keyword);
+      var exactMatchKeyword = "[" + sanitizedKeyword + "]";
+      if (!isKeywordAlreadyExists(currentList, exactMatchKeyword)) {
+        if (countNegativeKeywords(currentList) < maxKeywordsPerList) {
+          currentList.addNegativeKeyword(exactMatchKeyword);
+          Logger.log("Successfully added negative exact match keyword: " + exactMatchKeyword);
+        } else {
+          currentIndex++;
+          if (currentIndex > CONFIG.maxLists) {
+            Logger.log("Error: All negative keyword lists are full.");
+            return;
+          }
+          currentList = getNegativeKeywordListByName(baseListName + currentIndex);
+          if (currentList && countNegativeKeywords(currentList) < maxKeywordsPerList) {
+            currentList.addNegativeKeyword(exactMatchKeyword);
+            Logger.log("Successfully added negative exact match keyword to list " + currentIndex + ": " + exactMatchKeyword);
+          } else {
+            Logger.log("All negative keyword lists are full or the next list '" + baseListName + currentIndex + "' not found.");
+            return;
+          }
+        }
+      } else {
+        Logger.log("Keyword already exists, skipping: " + exactMatchKeyword);
+      }
+    } catch (e) {
+      Logger.log("Error adding negative keyword '" + keyword + "': " + e.toString());
+    }
+  });
+}
+
+function isKeywordAlreadyExists(negativeKeywordList, keyword) {
+  var keywordIterator = negativeKeywordList.negativeKeywords()
+    .withCondition("KeywordText = '" + keyword + "'")
+    .get();
+  return keywordIterator.hasNext();
+}
+
+function shuffleArray(array) {
+  for (var i = array.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var temp = array[i];
+    array[i] = array[j];
+    array[j] = temp;
+  }
+  return array;
+}
